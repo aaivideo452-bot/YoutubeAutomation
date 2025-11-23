@@ -1,11 +1,8 @@
 Flask==2.2.5
 moviepy==1.0.3
-yt-dlp==2024.12.10
+yt-dlp==2024.12.13
 requests==2.31.0
 imageio-ffmpeg==0.4.7
 numpy==1.23.5
 Pillow==9.5.0
 gunicorn==20.1.0
-
-# Optional (uncomment if you use environment files locally)
-# python-dotenv==0.21.0

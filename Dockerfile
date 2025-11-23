@@ -9,5 +9,5 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-ENV PORT=5000
-CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT"]
+EXPOSE 5000
+CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120"]

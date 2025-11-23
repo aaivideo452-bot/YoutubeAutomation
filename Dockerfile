@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Install ffmpeg and system deps
 RUN apt-get update && apt-get install -y ffmpeg gcc libsndfile1 git && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

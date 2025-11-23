@@ -2,7 +2,6 @@
 # Deploy this on render.com or similar service
 
 from flask import Flask, request, jsonify, send_file
-from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
 import yt_dlp
 import requests
 import os
@@ -19,15 +18,12 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')            # Set this in your 
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-1.0')  # Adjust if you have a different model name
 TEMP_DIR = tempfile.gettempdir()
 
+# Track last processing error for clearer responses
+LAST_PROCESS_ERROR = None
+
 def get_trending_video_using_gemini(max_results=5, region_code='US'):
     """Fetch top music videos from YouTube and use Gemini (Google Generative AI) to pick the
     single most trending video.
-
-    Notes:
-      - Requires YOUTUBE_API_KEY to query YouTube Data API.
-      - Requires GEMINI_API_KEY to call Gemini. The code uses the Generative Language HTTP
-        endpoint. Set GEMINI_MODEL if you need a different model name.
-      - If the Gemini call fails or the key is missing, falls back to a simple view-count heuristic.
     """
     if not YOUTUBE_API_KEY:
         print("YOUTUBE_API_KEY not set, cannot fetch trending videos")
@@ -51,8 +47,8 @@ def get_trending_video_using_gemini(max_results=5, region_code='US'):
         candidates = []
         for i, it in enumerate(items):
             vid = it.get('id')
-            snippet = it.get('snippet', {}) or {}  
-            stats = it.get('statistics', {}) or {}  
+            snippet = it.get('snippet', {}) or {} 
+            stats = it.get('statistics', {}) or {}
             title = snippet.get('title', '<no title>')
             channel = snippet.get('channelTitle', '<no channel>')
             try:
@@ -101,18 +97,15 @@ def get_trending_video_using_gemini(max_results=5, region_code='US'):
                 gresp.raise_for_status()
                 jr = gresp.json()
 
-                # The Generative Language API returns text in different fields depending on version.
+                # Extract text robustly
                 text = ''
-                # v1 responses may include 'candidates'
                 if isinstance(jr, dict):
                     if jr.get('candidates') and len(jr['candidates']) > 0:
-                        # candidate object might have 'output' or 'content'
                         cand = jr['candidates'][0]
                         if isinstance(cand, dict):
                             text = cand.get('content', '') or cand.get('output', '') or str(cand)
                     if not text and jr.get('output'):
                         if isinstance(jr['output'], list) and len(jr['output']) > 0:
-                            # try to join content parts
                             parts = []
                             for o in jr['output']:
                                 if isinstance(o, dict):
@@ -121,7 +114,6 @@ def get_trending_video_using_gemini(max_results=5, region_code='US'):
                                     parts.append(str(o))
                             text = "\n".join([p for p in parts if p])
                     if not text and jr.get('results'):
-                        # some shapes include results -> output
                         r0 = jr['results'][0]
                         if isinstance(r0, dict) and r0.get('output'):
                             parts = []
@@ -129,11 +121,9 @@ def get_trending_video_using_gemini(max_results=5, region_code='US'):
                                 if isinstance(o, dict):
                                     parts.append(o.get('content', '') or '')
                             text = '\n'.join([p for p in parts if p])
-                # fallback top-level text field
                 if not text and isinstance(jr.get('text'), str):
                     text = jr.get('text')
 
-                # Parse an integer index from Gemini's reply
                 m = re.search(r"(\d+)", text or "")
                 if m:
                     idx = int(m.group(1))
@@ -144,7 +134,6 @@ def get_trending_video_using_gemini(max_results=5, region_code='US'):
             except Exception as e:
                 print(f"Gemini selection failed: {e}")
 
-        # Fallback heuristic: pick the one with highest view count
         best = max(candidates, key=lambda x: x.get('views', 0))
         return best['url']
 
@@ -158,7 +147,6 @@ def get_trending_song():
 
     This function prefers a Gemini-based selection when GEMINI_API_KEY is set.
     """
-    # First try Gemini-based selection
     try:
         gem_choice = get_trending_video_using_gemini(max_results=5)
         if gem_choice:
@@ -166,7 +154,6 @@ def get_trending_song():
     except Exception as e:
         print(f"Gemini trending selection error: {e}")
 
-    # Legacy fallback: direct YouTube Data API call for a single mostPopular video
     try:
         if not YOUTUBE_API_KEY:
             return "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -189,7 +176,6 @@ def get_trending_song():
     except Exception as e:
         print(f"Error getting trending song: {e}")
 
-    # Final fallback
     return "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
@@ -236,15 +222,21 @@ def download_youtube_video(url, output_path):
 
 def process_video(input_video_path, output_video_path):
     """Remove original audio and add trending song"""
+    global LAST_PROCESS_ERROR
     try:
-        # Load video
+        # Lazy import moviepy to avoid startup crash if not installed
+        try:
+            from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
+        except Exception as e:
+            LAST_PROCESS_ERROR = f"moviepy import failed: {e}"
+            print(LAST_PROCESS_ERROR)
+            return False
+
         video = VideoFileClip(input_video_path)
 
-        # Get trending song
         trending_song_url = get_trending_song()
         print(f"Using trending song: {trending_song_url}")
 
-        # Download trending song audio
         audio_path = os.path.join(TEMP_DIR, f'trending_song_{int(time.time())}')
         downloaded_audio = download_youtube_audio(trending_song_url, audio_path)
 
@@ -259,10 +251,8 @@ def process_video(input_video_path, output_video_path):
                 remove_temp=True
             )
         else:
-            # Load new audio
             new_audio = AudioFileClip(downloaded_audio)
 
-            # Loop audio if video is longer
             if video.duration > new_audio.duration:
                 loops_needed = int(video.duration / new_audio.duration) + 1
                 new_audio = CompositeAudioClip([
@@ -270,14 +260,11 @@ def process_video(input_video_path, output_video_path):
                     for i in range(loops_needed)
                 ])
 
-            # Trim audio to video length
             new_audio = new_audio.subclip(0, video.duration)
 
-            # Remove original audio and add new audio
             video_without_audio = video.without_audio()
             final_video = video_without_audio.set_audio(new_audio)
 
-            # Write output
             final_video.write_videofile(
                 output_video_path,
                 codec='libx264',
@@ -286,7 +273,6 @@ def process_video(input_video_path, output_video_path):
                 remove_temp=True
             )
 
-            # Clean up
             new_audio.close()
             final_video.close()
 
@@ -299,13 +285,12 @@ def process_video(input_video_path, output_video_path):
         return True
 
     except Exception as e:
+        LAST_PROCESS_ERROR = str(e)
         print(f"Error processing video: {e}")
         return False
 
-
 @app.route('/download', methods=['POST'])
 def download_video():
-    """Download video from YouTube"""
     data = request.json
     video_url = data.get('videoUrl')
 
@@ -313,14 +298,10 @@ def download_video():
         return jsonify({'error': 'No video URL provided'}), 400
 
     try:
-        # Create temp file
         output_path = os.path.join(TEMP_DIR, f'video_{int(time.time())}.mp4')
-
-        # Download video
         downloaded_path = download_youtube_video(video_url, output_path)
 
         if downloaded_path and os.path.exists(downloaded_path):
-            # Return file URL (in production, upload to cloud storage)
             return jsonify({
                 'success': True,
                 'fileUrl': f'/get-file/{os.path.basename(downloaded_path)}'
@@ -331,10 +312,8 @@ def download_video():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/process-video', methods=['POST'])
 def process_video_endpoint():
-    """Process video: remove audio and add trending song"""
     data = request.json
     video_url = data.get('videoUrl')
 
@@ -342,7 +321,6 @@ def process_video_endpoint():
         return jsonify({'error': 'No video URL provided'}), 400
 
     try:
-        # Download video from URL
         input_path = os.path.join(TEMP_DIR, f'input_{int(time.time())}.mp4')
         response = requests.get(video_url, stream=True)
 
@@ -350,40 +328,33 @@ def process_video_endpoint():
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        # Process video
         output_path = os.path.join(TEMP_DIR, f'output_{int(time.time())}.mp4')
         success = process_video(input_path, output_path)
 
         if success and os.path.exists(output_path):
-            # In production, upload to cloud storage and return URL
-            # For now, return local path
             return jsonify({
                 'success': True,
                 'processedFileUrl': f'/get-file/{os.path.basename(output_path)}'
             })
         else:
-            return jsonify({'error': 'Failed to process video'}), 500
+            err = LAST_PROCESS_ERROR or 'Failed to process video'
+            return jsonify({'error': err}), 500
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        # Clean up input file
         if os.path.exists(input_path):
             os.remove(input_path)
 
-
 @app.route('/get-file/<filename>', methods=['GET'])
 def get_file(filename):
-    """Serve processed file"""
     file_path = os.path.join(TEMP_DIR, filename)
     if os.path.exists(file_path):
         return send_file(file_path, mimetype='video/mp4')
     return jsonify({'error': 'File not found'}), 404
 
-
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
     return jsonify({'status': 'healthy'})
 
 if __name__ == '__main__':

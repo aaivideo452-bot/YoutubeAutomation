@@ -4,6 +4,7 @@ import os
 import tempfile
 import time
 import json
+import traceback # Added for better error reporting
 
 app = Flask(__name__)
 
@@ -14,133 +15,64 @@ TEMP_DIR = tempfile.gettempdir()
 print(f"=== SERVER STARTING ===")
 print(f"TEMP_DIR: {TEMP_DIR}")
 
+# --- REFACTORED DOWNLOAD FUNCTION (Replaces both old downloaders) ---
 
-def download_youtube_video_via_api(url, output_path):
+def download_youtube_video(url, output_path_base):
     """
-    Download video using cobalt.tools API (no YouTube blocks!)
-    Alternative to yt-dlp that bypasses restrictions
+    Download video using yt-dlp.
+    This replaces the deprecated cobalt.tools API function and the old yt-dlp fallback.
+    Uses best-practice settings for merging streams into a reliable .mp4 file.
     """
-    print(f"\n>>> Downloading via API: {url}")
-    
-    try:
-        # Use cobalt.tools API (free, no auth needed)
-        api_url = "https://api.cobalt.tools/api/json"
-        
-        headers = {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
-        }
-        
-        payload = {
-            "url": url,
-            "vQuality": "720",  # Download 720p quality
-            "filenamePattern": "basic",
-            "isAudioOnly": False
-        }
-        
-        print(">>> Requesting download link from API...")
-        response = requests.post(api_url, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            print(f">>> API error: {response.status_code}")
-            print(f">>> Response: {response.text}")
-            return None
-        
-        data = response.json()
-        print(f">>> API response: {data.get('status', 'unknown')}")
-        
-        # Handle different response types
-        download_url = None
-        
-        if data.get('status') == 'redirect' or data.get('status') == 'stream':
-            download_url = data.get('url')
-        elif data.get('status') == 'picker':
-            # Multiple formats available, pick first video
-            picker = data.get('picker', [])
-            if picker:
-                download_url = picker[0].get('url')
-        
-        if not download_url:
-            print(f">>> No download URL found. Response: {data}")
-            # Fallback to yt-dlp if API fails
-            return download_youtube_video_ytdlp(url, output_path)
-        
-        # Download the video
-        print(f">>> Downloading from: {download_url[:50]}...")
-        video_response = requests.get(download_url, stream=True, timeout=300)
-        video_response.raise_for_status()
-        
-        final_path = output_path if output_path.endswith('.mp4') else output_path + '.mp4'
-        
-        with open(final_path, 'wb') as f:
-            for chunk in video_response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        
-        if os.path.exists(final_path):
-            size = os.path.getsize(final_path)
-            print(f">>> SUCCESS! Downloaded: {size} bytes ({size/1024/1024:.2f} MB)")
-            return final_path
-        
-        return None
-        
-    except Exception as e:
-        print(f">>> API download failed: {str(e)}")
-        # Fallback to yt-dlp
-        return download_youtube_video_ytdlp(url, output_path)
-
-
-def download_youtube_video_ytdlp(url, output_path):
-    """
-    Fallback: Download using yt-dlp with cookies and user-agent spoofing
-    """
-    print(f"\n>>> Fallback to yt-dlp: {url}")
+    print(f"\n>>> Starting yt-dlp download: {url}")
     
     try:
         import yt_dlp
         
+        # Robust yt-dlp configuration to maximize success rate and ensure .mp4 output
         ydl_opts = {
-            'format': 'best[height<=720][ext=mp4]/best[ext=mp4]/best',
-            'outtmpl': output_path,
+            # 1. Select the best 720p video stream + best audio stream, then merge them. 
+            # Fallback to the best 720p format, then best overall.
+            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            # 2. Force the output to be a single mp4 file after merging (requires ffmpeg, but moviepy suggests it's available)
+            'merge_output_format': 'mp4', 
+            # 3. Use the output path base with an extension placeholder for correct file naming
+            'outtmpl': f'{output_path_base}.%(ext)s', 
             'quiet': False,
             'no_warnings': False,
-            # Spoof user agent to look like a browser
+            # Spoof user agent to look like a browser to mitigate some bot checks
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            # Add referer
             'referer': 'https://www.youtube.com/',
             'socket_timeout': 30,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(">>> Extracting video info...")
+            print(">>> Extracting video info and downloading...")
             info = ydl.extract_info(url, download=True)
             print(f">>> Title: {info.get('title', 'Unknown')}")
-        
-        # Check for file
-        possible_paths = [
-            output_path,
-            f"{output_path}.mp4",
-            output_path.replace('.mp4', '') + '.mp4'
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                size = os.path.getsize(path)
-                print(f">>> SUCCESS! File at: {path} ({size/1024/1024:.2f} MB)")
-                return path
+            
+        # The final path is reliably output_path_base.mp4 due to 'merge_output_format': 'mp4'
+        final_path = f"{output_path_base}.mp4" 
+
+        if os.path.exists(final_path):
+            size = os.path.getsize(final_path)
+            print(f">>> SUCCESS! File at: {final_path} ({size/1024/1024:.2f} MB)")
+            return final_path
         
         print(">>> ERROR: File not found after download")
         return None
             
     except Exception as e:
-        print(f">>> yt-dlp failed: {str(e)}")
-        import traceback
+        print(f">>> yt-dlp download failed: {str(e)}")
         traceback.print_exc()
         return None
 
 
+# --- The obsolete download_youtube_video_via_api has been removed ---
+# --- The obsolete download_youtube_video_ytdlp has been removed/renamed ---
+
+
 def download_youtube_audio(url, output_path):
-    """Download audio from YouTube video"""
+    """Download audio from YouTube video (unchanged, still uses yt-dlp)"""
     print(f"\n>>> Downloading audio: {url}")
     
     try:
@@ -148,7 +80,8 @@ def download_youtube_audio(url, output_path):
         
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': output_path,
+            # Use outtmpl with extension for reliable path finding
+            'outtmpl': f'{output_path}.%(ext)s', 
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -161,10 +94,18 @@ def download_youtube_audio(url, output_path):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         
+        # Since preferredcodec is 'mp3', we check for .mp3
         mp3_path = output_path + '.mp3'
         if os.path.exists(mp3_path):
             print(f">>> Audio downloaded: {mp3_path}")
             return mp3_path
+        
+        # Also check for other extensions that might have been used
+        for ext in ['webm', 'm4a', 'aac']:
+             possible_path = f"{output_path}.{ext}"
+             if os.path.exists(possible_path):
+                print(f">>> Audio downloaded: {possible_path}")
+                return possible_path
         
         return None
             
@@ -174,7 +115,7 @@ def download_youtube_audio(url, output_path):
 
 
 def get_trending_song():
-    """Get trending music video URL"""
+    """Get trending music video URL (unchanged)"""
     print("\n>>> Getting trending song...")
     
     if not YOUTUBE_API_KEY:
@@ -208,7 +149,7 @@ def get_trending_song():
 
 
 def process_video(input_path, output_path):
-    """Process video: remove audio and add new music"""
+    """Process video: remove audio and add new music (unchanged)"""
     print(f"\n>>> Processing video: {input_path}")
     
     try:
@@ -245,7 +186,7 @@ def process_video(input_path, output_path):
                 loops = int(video.duration / new_audio.duration) + 1
                 print(f">>> Looping audio {loops} times")
                 new_audio = CompositeAudioClip([
-                    new_audio.set_start(i * new_audio.duration) 
+                    new_audio.set_start(i * new_audio.duration)  
                     for i in range(loops)
                 ])
             
@@ -275,7 +216,6 @@ def process_video(input_path, output_path):
 
     except Exception as e:
         print(f">>> ERROR: {str(e)}")
-        import traceback
         traceback.print_exc()
         return False
 
@@ -285,7 +225,7 @@ def home():
     return jsonify({
         'service': 'YouTube Video Automation',
         'status': 'running',
-        'version': '2.0 - API-based',
+        'version': '3.0 - yt-dlp only',
         'endpoints': ['/health', '/download', '/process-video', '/get-file/<filename>']
     })
 
@@ -296,7 +236,7 @@ def health():
         'status': 'healthy',
         'temp_dir': TEMP_DIR,
         'youtube_api': bool(YOUTUBE_API_KEY),
-        'download_method': 'cobalt.tools API + yt-dlp fallback'
+        'download_method': 'yt-dlp (consolidated)'
     })
 
 
@@ -318,8 +258,8 @@ def download_endpoint():
         timestamp = int(time.time())
         output_base = os.path.join(TEMP_DIR, f'video_{timestamp}')
         
-        # Use API-based download (bypasses YouTube blocks)
-        downloaded_path = download_youtube_video_via_api(video_url, output_base)
+        # --- MODIFIED: Direct call to the new, unified download function ---
+        downloaded_path = download_youtube_video(video_url, output_base)
 
         if downloaded_path and os.path.exists(downloaded_path):
             filename = os.path.basename(downloaded_path)
@@ -336,11 +276,10 @@ def download_endpoint():
             })
         else:
             print("=== FAILED ===")
-            return jsonify({'error': 'Download failed'}), 500
+            return jsonify({'error': 'Download failed. yt-dlp may be rate-limited by YouTube.'}), 500
 
     except Exception as e:
         print(f"=== EXCEPTION: {str(e)} ===")
-        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -362,6 +301,12 @@ def process_endpoint():
         print(f"Request: {video_url}")
         
         timestamp = int(time.time())
+        
+        # For /process-video, the original code attempts to download the input video 
+        # using requests, assuming it's a direct URL to a video file, not a YouTube URL.
+        # If the intention was to download a YouTube video, it should call 
+        # download_youtube_video(). Assuming it's a direct video link for now.
+        
         input_path = os.path.join(TEMP_DIR, f'input_{timestamp}.mp4')
         
         print(f">>> Downloading input...")
@@ -395,7 +340,6 @@ def process_endpoint():
 
     except Exception as e:
         print(f"=== EXCEPTION: {str(e)} ===")
-        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
